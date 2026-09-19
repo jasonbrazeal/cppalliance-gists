@@ -1,0 +1,14 @@
+#!/bin/bash
+
+set -uxo pipefail
+
+/code/promptforge-cli/target/debug/promptforge run -v /mnt/VM/author_advocacy.promptforge.md --args '{"id": "P3045R9", "author": "Mateusz Pusz"}' --input paper.md=/code/wg21-paperflow/data/paperstore/p3045r9.md --output author_advocacy.json=/code/promptforge-cli/p3045r9.author-advocacy.json
+/code/promptforge-cli/target/debug/promptforge run -v /mnt/VM/author_advocacy.promptforge.md --args '{"id": "P2728R14", "author": "Eddie Nolan"}' --input paper.md=/code/wg21-paperflow/data/paperstore/p2728r14.md --output author_advocacy.json=/code/promptforge-cli/p2728r14.author-advocacy.json
+/code/promptforge-cli/target/debug/promptforge run -v /mnt/VM/author_advocacy.promptforge.md --args '{"id": "P0260R20", "author": "Detlef Vollmann"}' --input paper.md=/code/wg21-paperflow/data/paperstore/p0260r20.md --output author_advocacy.json=/code/promptforge-cli/p0260r20.author-advocacy.json
+/code/promptforge-cli/target/debug/promptforge run -v /mnt/VM/author_advocacy.promptforge.md --args '{"id": "P1040R11", "author": "JeanHeyd Meneide"}' --input paper.md=/code/wg21-paperflow/data/paperstore/p1040r11.md --output author_advocacy.json=/code/promptforge-cli/p1040r11.author-advocacy.json
+/code/promptforge-cli/target/debug/promptforge run -v /mnt/VM/author_advocacy.promptforge.md --args '{"id": "P3091R6", "author": "Pablo Halpern"}' --input paper.md=/code/wg21-paperflow/data/paperstore/p3091r6.md --output author_advocacy.json=/code/promptforge-cli/p3091r6.author-advocacy.json
+/code/promptforge-cli/target/debug/promptforge run -v /mnt/VM/author_advocacy.promptforge.md --args '{"id": "P2806R5", "author": "Barry Revzin"}' --input paper.md=/code/wg21-paperflow/data/paperstore/p2806r5.md --output author_advocacy.json=/code/promptforge-cli/p2806r5.author-advocacy.json
+/code/promptforge-cli/target/debug/promptforge run -v /mnt/VM/author_advocacy.promptforge.md --args '{"id": "P3100R8", "author": "Timur Doumler"}' --input paper.md=/code/wg21-paperflow/data/paperstore/p3100r8.md --output author_advocacy.json=/code/promptforge-cli/p3100r8.author-advocacy.json
+/code/promptforge-cli/target/debug/promptforge run -v /mnt/VM/author_advocacy.promptforge.md --args '{"id": "P2826R4", "author": "Gašper Ažman"}' --input paper.md=/code/wg21-paperflow/data/paperstore/p2826r4.md --output author_advocacy.json=/code/promptforge-cli/p2826r4.author-advocacy.json
+/code/promptforge-cli/target/debug/promptforge run -v /mnt/VM/author_advocacy.promptforge.md --args '{"id": "P2287R6", "author": "Barry Revzin"}' --input paper.md=/code/wg21-paperflow/data/paperstore/p2287r6.md --output author_advocacy.json=/code/promptforge-cli/p2287r6.author-advocacy.json
+/code/promptforge-cli/target/debug/promptforge run -v /mnt/VM/author_advocacy.promptforge.md --args '{"id": "P2719R7", "author": "Louis Dionne"}' --input paper.md=/code/wg21-paperflow/data/paperstore/p2719r7.md --output author_advocacy.json=/code/promptforge-cli/p2719r7.author-advocacy.json
