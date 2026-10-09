@@ -57,50 +57,27 @@ Because the server answers from Qdrant, a paper is visible in every tool only af
 ## 4. Architecture Overview
 
 ```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 400}}}%%
 flowchart LR
-    subgraph WS[paperstore workspace]
-        DB[("paperstore.db<br/>papers, paper_citations")]
-        MD[paper .md files]
-    end
-    subgraph ING[paper-mcp ingest]
-        I1[Select papers by target]
-        I2[Split into sections]
-        I3[Chunk sections]
-        I4[Embed chunks with BGE-M3]
-        I5[Build paper record]
-        I1 --> I2 --> I3 --> I4
-        I1 --> I5
-    end
+    WS[("paperstore workspace<br/>(paperstore.db, md files)")]
+    ING["paper-mcp ingest<br/>(split by sections and chunks, embed)"]
     subgraph Q[Qdrant]
-        QC[(paper_chunks)]
+        QC[(papers)]
         QM[(paper_metadata)]
     end
+    T1["get_metadata<br/>search_metadata<br/>list_revisions<br/>get_citations<br/>get_outline<br/>get_lines<br/>get_sections"]
+    T2["search<br/>(fulltext bm25, vector, hybrid)"]
     subgraph SRV[paper-mcp serve]
-        GM[get_metadata]
-        SM[search_metadata]
-        LR[list_revisions]
-        GC[get_citations]
-        GO[get_outline]
-        GL[get_lines]
-        GS[get_sections]
-        S[search]
-        E[Embed query with BGE-M3]
-        S --> E
+        T1
+        T2
     end
-    C[PromptForge prompt] -->|MCP over HTTPS| SRV
-    DB -->|read-only| I1
-    MD -->|read-only| I1
-    I4 -->|1. chunks| QC
-    I5 -->|2. record| QM
-    GM --> QM
-    SM --> QM
-    LR --> QM
-    GC --> QM
-    GO --> QM
-    GL --> QM
-    GS --> QM
-    S -->|author filter| QM
-    E --> QC
+    C[PromptForge prompt]
+
+    WS -->|read-only| ING
+    ING --> Q
+    T1 --> QM
+    T2 --> QC
+    C -->|MCP over HTTPS| SRV
 ```
 
 **Ingest** is a batch command an operator runs after paperflow has converted a mailing. It opens `paperstore.db` read-only (`SQLITE_OPEN_READ_ONLY`, through `rusqlite`, with its own queries; it does not use the `paperstore-sqlite` crate, whose open path runs schema migrations), reads the markdown files, and writes both Qdrant collections.
@@ -159,7 +136,16 @@ Blank lines belong to the block before them; blank lines at the start of a secti
 - The target size is about 400 tokens. A chunk runs long rather than split a block.
 - A code block or table that alone exceeds the embedding model's 8,192-token input limit is split at line boundaries into parts that each fit, with the opening fence (for a code block) or header row (for a table) repeated at the top of each part, so every line is embedded. This is the only case where a block is split.
 - Each chunk after the first in a section starts with an overlap: the previous chunk's last block, repeated whole, when that block is at most 200 tokens. Otherwise there is no overlap. The overlap is never part of a block, so a code block is never cut by it.
-- The text that is embedded starts with a context line, the paper id and the heading path (for example `p3045r9 › 4 Design › 4.2 Units`), followed by the chunk text.
+- **Contextual embeddings.** A chunk on its own often does not say what it is from: a paragraph of a design section rarely names the paper or the facility it discusses. So the text that is embedded starts with a context header identifying the chunk's source, followed by a blank line and the chunk text. The header gives the chunk's `paper_id`, `title`, `heading_path`, and `section_index`, one per line:
+
+  ```
+  Paper: p3045r9
+  Title: Quantities and units library
+  Section 5: 4 Design › 4.2 Units
+  ```
+
+  The header is the same for every chunk of a section, so the dense vector reflects both the chunk's own content and where it sits in the paper.
+- A chunk's stored `text` is exactly the paper's lines `first_line` through `last_line`, including any overlap, as `get_lines` returns them. The context header, and the fence line or header row repeated at the top of a split part, are added only to the embedded text and never to `text`, so `text` always equals `get_lines(paper, first_line, last_line)`.
 - Tokens are counted with the BGE-M3 tokenizer.
 
 The 400-token target and the 200-token overlap limit are starting values and may need tuning once real search results can be judged; both are set in configuration. Chunking is deterministic: the same markdown and settings always produce the same chunks.
@@ -236,7 +222,12 @@ Searches paper text in the `paper_chunks` collection (§7.1). `query` and `type`
 - `date_field`: `document_date` (the default) or `mailing_date`. A `mailing_date`, which is a month, compares as the first of that month. When filtering on `document_date`, papers with no document date are excluded.
 - `author`: matches any author whose name contains the given text, after case and accent folding on both sides (`iebler` finds `Eric Niebler`; `cagri` finds `Murat Can Çağrı`).
 
-Each hit is one chunk: `paper_id`, `title`, `heading_path`, `section_index`, `first_line`, `last_line`, `text`, and `score`. A paper can appear more than once on a page. Paging is §7.6.
+Each hit is one chunk and must carry its full provenance: `paper_id`, `title`, `url`, `heading_path`, `section_index`, `first_line`, `last_line`, `match_lines`, `text`, and `score`.
+
+- `first_line` and `last_line` are the exact lines of the paper (§5.2) the chunk covers, and `text` is exactly `get_lines(paper_id, first_line, last_line)` (§5.5), so a caller can cite the passage by line number or fetch it again.
+- `match_lines` lists every line in that range that contains a query term, tokenized by the same rules as BM25 (§7.2). Serve computes it at query time from `text`. It is empty when no query term appears in the chunk, which can happen for `vector` hits and for hits that `hybrid` takes from the vector side, because a semantic match need not share any word with the query; the hit's `first_line` and `last_line` remain its provenance.
+
+A paper can appear more than once on a page. Paging is §7.6.
 
 ### 6.9 Papers without markdown
 
@@ -260,7 +251,7 @@ One point (Qdrant's term for a stored record) per chunk, with:
 
 - a dense vector `dense`: BGE-M3, 1,024 dimensions, cosine distance;
 - a sparse vector `bm25`: Qdrant's BM25 with the IDF modifier, generated by Qdrant from the chunk text (see BM25 settings below), so C++ keywords such as `for`, `if`, `and`, `or`, and `not` and identifiers such as `views` and `ranges` match as words. Punctuation is not indexed, so operators such as `<=>` and `::` are not searchable;
-- a payload with `paper_id`, `title`, `document_date`, `mailing_date`, `mailing_date_filter`, `section_index`, `heading_path`, `first_line`, `last_line`, and `text`.
+- a payload with `paper_id`, `title`, `url`, `document_date`, `mailing_date`, `mailing_date_filter`, `section_index`, `heading_path`, `first_line`, `last_line`, and `text`.
 
 ### 7.2 Embeddings
 
@@ -313,7 +304,7 @@ A `search_metadata` query runs against all three vectors as prefetches, merged b
 
 Ingest writes every paper id in lower case. A paper has markdown when its `markdown_path` is non-empty. Ingest reads the markdown from `markdown_path` as stored; a path that cannot be read is logged as an error naming the paper and the path, and the paper counts as failed.
 
-For each selected paper, ingest writes its `paper_metadata` record (§7.5), whether or not the paper has markdown, replacing any existing record so metadata and citations stay current. A paper with markdown is chunked when its existing record has no `markdown`, when the record's `chunker_version` differs from the current one, or when `--force` is given. `chunker_version` is a hash of everything that shapes chunks: the splitter and chunker code version, the chunk target size, the overlap limit, and the embedding model. Chunking a paper first deletes all of its points in `paper_chunks` by `paper_id`, then splits it into sections (§5.4), chunks them (§5.5), embeds the chunks (§7.2), and writes them. Each chunk's point id is a UUIDv5 of the paper id, section index, and chunk number within the section, so rewriting a paper never duplicates points. A paper's chunks are written before its metadata record, which then stores `markdown` and `chunker_version`; a paper whose record holds `markdown` therefore always has complete chunks, and a paper interrupted mid-ingest is chunked again on the next run. Ingest reports how many papers it indexed, skipped, and failed, and which had no markdown.
+For each selected paper, ingest writes its `paper_metadata` record (§7.5), whether or not the paper has markdown, replacing any existing record so metadata and citations stay current. A paper with markdown is chunked when its existing record has no `markdown`, when the record's `chunker_version` differs from the current one, or when `--force` is given. `chunker_version` is a hash of everything that shapes chunks: the splitter and chunker code version, the chunk target size, the overlap limit, the context header format, and the embedding model. Chunking a paper first deletes all of its points in `paper_chunks` by `paper_id`, then splits it into sections (§5.4), chunks them (§5.5), embeds the chunks (§7.2), and writes them. Each chunk's point id is a UUIDv5 of the paper id, section index, and chunk number within the section, so rewriting a paper never duplicates points. A paper's chunks are written before its metadata record, which then stores `markdown` and `chunker_version`; a paper whose record holds `markdown` therefore always has complete chunks, and a paper interrupted mid-ingest is chunked again on the next run. Ingest reports how many papers it indexed, skipped, and failed, and which had no markdown.
 
 The local store holds about 470 MB of markdown, so the first full ingest embeds several hundred thousand chunks on CPU and takes hours.
 
@@ -341,6 +332,7 @@ Ingest runs by hand in the server's image: `docker compose run --rm paper-mcp-ru
 - No tool shortens, truncates, or windows paper text. `get_lines` and `get_sections` return everything requested in one response.
 - Every word of a paper appears in `get_lines(paper)`, in the concatenation of `get_sections(paper)`, and in at least one `paper_chunks` point.
 - All line numbers and `section_index` values are 1-based and agree across every tool and every search hit.
+- Every search hit carries its paper id, section, and exact line range, and its `text` equals `get_lines` over that range.
 - Sections tile the paper with no gaps or overlaps. Chunks never cross a section boundary.
 - Only `P<number>R<revision>`, `D<number>R<revision>`, `N<number>`, and `SD-<number>` ids are accepted, in any case; bare `P<number>` and `D<number>` are accepted only by `list_revisions`. Ids are stored and returned in lower case.
 - `search` rejects a call without `query` or `type`; `search_metadata` rejects a call with neither a query nor a filter.
