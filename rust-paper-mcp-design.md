@@ -37,7 +37,7 @@ The binary has two commands. `paper-mcp ingest` reads the paperstore and copies 
 - Qdrant Cloud. Qdrant is self-hosted from the start.
 - Reranking with a model.
 - Automatic ingest. Ingest runs only when an operator runs it.
-- Changes to the prompts that consume this server (see §12).
+- Changes to the prompts that consume this server (see §14).
 
 ## 3. Background and Context
 
@@ -106,7 +106,7 @@ A code fence opens at a line whose first non-whitespace characters are three or 
 
 ### 5.4 Sections
 
-Sections are produced by the splitter that today's paperweight and papergate prompts use (the Assess section of `crates/paperweight/paperweight.md`, carried into `/code/wg21-papergate/papergate_v8.md`), ported to Rust, with code fences skipped:
+Sections are produced by these rules, with headings inside code fences ignored (§5.3):
 
 1. The primary boundaries are H2 headings together with bold-numbered headings.
 2. When the primary boundaries yield fewer than four sections, the first of these that yields at least four is used instead: H3 headings, H1 headings, then plain numbered lines (`3. Title`). When none yields four, the primary boundaries are used.
@@ -317,7 +317,83 @@ Ingest runs only when an operator runs it by hand. No timer, hook, or pipeline s
 - **Data access.** The server reads only Qdrant. It does not open `paperstore.db` or the markdown files. The Qdrant client's message size limits, in both ingest and serve, are raised above the largest paper record (the largest markdown file, n4485, is 3.4 MB). Both collections are created with `on_disk_payload` so the roughly 470 MB of stored markdown stays on disk rather than in RAM.
 - **Rust version.** The workspace `rust-version` is raised from 1.89 to what the dependencies require. The pinned toolchain is already 1.98.0.
 
-## 10. Deployment
+## 10. Implementation
+
+### 10.1 Crate layout
+
+paper-mcp is one workspace member with `publish = false`. It inherits the workspace's package fields and its lints (`[lints] workspace = true`), which already forbid `unsafe` code and deny `unwrap` and `expect`. It stays one crate unless a measured build-time cost or a second consumer of its text code justifies a split.
+
+The logic lives in the library. `src/main.rs` only parses the `ingest` and `serve` subcommands with `clap` and calls into the library. One module per concept:
+
+| Module | Holds | Input and output |
+|---|---|---|
+| `paper_id` | `PaperId` parsing and lower-casing (§5.1) | none |
+| `text` | lines, headings, fences, sections, blocks, chunks, and the context header (§5.2–§5.5) | none |
+| `bm25` | the BM25 options (§7.2) and the tokenizer `match_lines` uses (§6.8) | none |
+| `cursor` | encoding and checking paging cursors (§7.6) | none |
+| `config` | the typed configuration, read once at startup | environment, config file |
+| `embed` | the BGE-M3 model and its worker thread (§7.2, §10.4) | model cache |
+| `qdrant` | collection setup, payload types, and queries (§7) | Qdrant |
+| `ingest` | the ingest command (§8) | paperstore, Qdrant |
+| `serve` | the MCP tools, auth, and error mapping (§6, §9) | HTTP, Qdrant |
+
+The first four modules do no input or output. The rules that define ids, lines, sections, chunks, and paging are therefore tested without Qdrant or a model, and ingest and serve run the same code, which is what the "One splitter" goal requires.
+
+### 10.2 Types
+
+- `PaperId` is a newtype built only by parsing (`FromStr`) and always lower case. Every tool parses its id arguments first, so a malformed id fails with `invalid_paper_id` before any Qdrant call.
+- Line numbers, section indexes, and chunk numbers are separate 1-based newtypes, so passing one where another is expected, or using a 0-based index, does not compile. `first` and `last` arguments, including negative values, are resolved once at the tool boundary into an inclusive range type (§6.5), and nothing past that point handles negative indexes.
+- Closed sets of arguments (`type`, `date_field`, `direction`) are enums parsed from the tool arguments, not strings checked later.
+- Configuration is parsed into a typed struct at startup. An invalid or missing setting stops startup with an error naming the setting.
+
+### 10.3 Errors
+
+- The library returns typed errors derived with `thiserror`. Tool errors form one enum whose variants map one-to-one to the codes in §6.10. The binary uses `anyhow` and prints the full error chain on exit.
+- Every expected failure, including malformed input, a missing paper, and a bad cursor, is a `Result`. Tool handlers never panic on any input.
+- An `internal_error` is logged once, with its full error chain and a request id, at the layer that turns it into a response. The response carries only the code, a generic message, and that request id.
+- In ingest, a failure confined to one paper is logged with the paper id and its cause, counted, and does not stop the run. Failing to reach Qdrant or to load the model stops the run with a nonzero exit status.
+
+### 10.4 Concurrency
+
+- Serve runs on the multi-threaded tokio runtime under axum.
+- Embedding a query is CPU-bound, so it never runs on the async executor. One worker thread owns the model and takes requests over a bounded channel, replying through a oneshot channel. A full channel makes the caller wait instead of growing an unbounded queue.
+- The token set (§9) sits behind a `std::sync::RwLock` and is replaced whole on SIGHUP. The auth check releases the lock before any `.await`.
+- On SIGTERM, serve stops accepting connections and lets in-flight requests finish before exiting.
+- Ingest processes one paper at a time and embeds its chunks in batches. ONNX Runtime already uses every core for a batch, so ingest adds no thread pool of its own. The per-paper write order in §8 is kept by awaiting each paper's writes before starting the next paper.
+
+### 10.5 Dependencies
+
+| Need | Crate |
+|---|---|
+| MCP server | `rmcp` |
+| HTTP | `axum` |
+| async runtime | `tokio` |
+| Qdrant | `qdrant-client` |
+| embeddings | `fastembed` |
+| reading the paperstore | `rusqlite`, already used in the workspace |
+| command line | `clap` with derive |
+| errors | `thiserror` in the library, `anyhow` in the binary |
+| logging | `tracing` with `tracing-subscriber` |
+| chunk point ids | `uuid` with the `v5` feature |
+| accent folding | `unicode-normalization` |
+| serialization | `serde`, `serde_json` |
+| tests only | `proptest`, `insta` |
+
+Each crate's name, features, and version are checked against crates.io and its repository when it is added, and no other dependency is added without the same check.
+
+### 10.6 Observability
+
+Serve logs one `tracing` span per tool call, with the tool name, the paper ids it was given, the result code, and the duration. Ingest logs one line per paper and a summary at the end (§8).
+
+## 11. Testing
+
+- **Unit tests** sit beside the code in the four pure modules (§10.1). They cover a trailing newline and stray `\r` characters (§5.2), indented and unclosed code fences and bold-numbered headings (§5.3), each step of the section fallback and the blank front-matter rule (§5.4), the chunk target, overlap, and oversized-block splits (§5.5), every row of the `get_lines` table (§6.5), and cursor round trips (§7.6).
+- **Property tests** (`proptest`) generate markdown and check the text invariants of §13: sections tile the paper; chunks cover every line of their section and never cross a section boundary; each chunk's `text` equals its line range; and the same input always produces the same sections and chunks.
+- **Golden files** (`insta` snapshots) record the outline, sections, and chunk boundaries of a few real papers chosen for their shape: p3045r9 (H2 headings), p4021r2 (mixed H2 and bold-numbered headings), p3248r5 (hackmd export), n3768 (stray `\r`), n4485 (the largest file), and one paper with indented fences.
+- **Integration tests** live in one binary, `tests/it/main.rs`. They ingest a small fixture paperstore into a real Qdrant 1.19 and call every tool over MCP, checking the error codes of §6.10 and that every search hit's `text` equals `get_lines` over its range. They also check that every `fulltext` hit has a non-empty `match_lines`, which catches any drift between the `match_lines` tokenizer and Qdrant's BM25. These tests need Qdrant and the model cache, so they are marked `#[ignore]` with that reason and run in a separate CI job that provides both.
+- **CI** runs `cargo fmt --all --check`, `cargo clippy -p paper-mcp --all-targets --all-features -- -D warnings`, `cargo test --locked -p paper-mcp`, and `cargo deny check` for paper-mcp, alongside the existing jobs.
+
+## 12. Deployment
 
 paper-mcp is deployed by `wg21-website`'s `docker-compose.yml` as two new services beside the existing ones:
 
@@ -326,7 +402,7 @@ paper-mcp is deployed by `wg21-website`'s `docker-compose.yml` as two new servic
 
 Ingest runs by hand in the server's image: `docker compose run --rm paper-mcp-rust paper-mcp ingest <targets>`.
 
-## 11. Invariants
+## 13. Invariants
 
 - The server reads only Qdrant. Ingest is the only process that reads the paperstore or writes to Qdrant, and it never writes to the paperstore.
 - No tool shortens, truncates, or windows paper text. `get_lines` and `get_sections` return everything requested in one response.
@@ -343,7 +419,7 @@ Ingest runs by hand in the server's image: `docker compose run --rm paper-mcp-ru
 - The same markdown and settings always produce the same sections and chunks.
 - Ingest never runs automatically.
 
-## 12. Consumers
+## 14. Consumers
 
 - **Agora author-advocacy prompt** (`/code/wg21-agora/prompts/agora-author-advocacy.md`) reads the paper under scan and the author's other papers in full, finds those papers with `search_metadata`, follows revisions with `list_revisions`, and finds responses with `get_citations`.
 - **Papergate prompt** (`/code/wg21-papergate/papergate_v8.md`) gets its section fragments from `get_sections` instead of its own Lua splitter, as input to the classifier stages Vinnie proposed.
