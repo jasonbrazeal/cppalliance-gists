@@ -59,34 +59,48 @@ Because the server answers from Qdrant, a paper is visible in every tool only af
 ```mermaid
 flowchart LR
     subgraph WS[paperstore workspace]
-        DB[(paperstore.db)]
+        DB[("paperstore.db<br/>papers, paper_citations")]
         MD[paper .md files]
     end
     subgraph ING[paper-mcp ingest]
-        I1[Select papers]
-        I2[Build paper records]
-        I3[Split into sections]
-        I4[Chunk sections]
-        I5[Embed chunks with BGE-M3]
+        I1[Select papers by target]
+        I2[Split into sections]
+        I3[Chunk sections]
+        I4[Embed chunks with BGE-M3]
+        I5[Build paper record]
+        I1 --> I2 --> I3 --> I4
+        I1 --> I5
     end
     subgraph Q[Qdrant]
-        QM[(paper_metadata)]
         QC[(paper_chunks)]
+        QM[(paper_metadata)]
     end
     subgraph SRV[paper-mcp serve]
-        T1[Metadata and citation tools]
-        T2[Text tools]
-        T3[search / search_metadata]
+        GM[get_metadata]
+        SM[search_metadata]
+        LR[list_revisions]
+        GC[get_citations]
+        GO[get_outline]
+        GL[get_lines]
+        GS[get_sections]
+        S[search]
+        E[Embed query with BGE-M3]
+        S --> E
     end
     C[PromptForge prompt] -->|MCP over HTTPS| SRV
-    DB -->|read-only| ING
-    MD -->|read-only| ING
-    ING --> QM
-    ING --> QC
-    T1 --> QM
-    T2 --> QM
-    T3 --> QM
-    T3 --> QC
+    DB -->|read-only| I1
+    MD -->|read-only| I1
+    I4 -->|1. chunks| QC
+    I5 -->|2. record| QM
+    GM --> QM
+    SM --> QM
+    LR --> QM
+    GC --> QM
+    GO --> QM
+    GL --> QM
+    GS --> QM
+    S -->|author filter| QM
+    E --> QC
 ```
 
 **Ingest** is a batch command an operator runs after paperflow has converted a mailing. It opens `paperstore.db` read-only (`SQLITE_OPEN_READ_ONLY`, through `rusqlite`, with its own queries; it does not use the `paperstore-sqlite` crate, whose open path runs schema migrations), reads the markdown files, and writes both Qdrant collections.
@@ -103,13 +117,15 @@ A bare `P<number>` or `D<number>`, with no revision, is accepted only by `list_r
 
 ### 5.2 Lines
 
-A line is the text between `\n` characters after a trailing `\r` is removed. A newline at the end of the file does not create an empty last line. Lines are numbered from 1. `get_metadata`, `get_outline`, `get_lines`, `get_sections`, and search hits all use this one definition. paperstore's `line_count` column is not used, because it is `count("\n") + 1` and disagrees by one when a file ends in a newline.
+A line is the text between `\n` characters. A newline at the end of the file does not create an empty last line. `\r` is an ordinary character, not a line break: tomd writes `\n` line endings, but some N papers carry stray `\r` characters inside lines from their source documents (n3768 has 594 such lines, for example `### 1.3 \r Approve \r minutes`), and treating them as breaks would shift line numbers. Lines are numbered from 1. `get_metadata`, `get_outline`, `get_lines`, `get_sections`, and search hits all use this one definition. paperstore's `line_count` column is not used, because it is `count("\n") + 1` and disagrees by one when a file ends in a newline.
 
 Text is returned as stored, with lines joined by `\n`.
 
 ### 5.3 Headings
 
-A heading is any line outside a code fence that is either a markdown heading (`#` to `######` followed by text) or a bold-numbered line (a number, an optional `.` or `)`, then text wrapped in `**`, and nothing else, as in `2. **Motivation and Scope**`). Heading text is cleaned before it is returned: leading and trailing `#` marks are removed, hackmd anchor links (`[#Changelog](#Changelog)`) are dropped, `[text](link)` becomes `text`, emphasis and code marks are removed, and whitespace is collapsed. A code fence starts and ends at a line beginning with three backticks.
+A heading is any line outside a code fence that is either a markdown heading (`#` to `######` followed by text) or a bold-numbered line (a number, an optional `.` or `)`, then text wrapped in `**`, and nothing else, as in `2. **Motivation and Scope**`). Heading text is cleaned before it is returned: leading and trailing `#` marks are removed, hackmd anchor links (`[#Changelog](#Changelog)`) are dropped, `[text](link)` becomes `text`, emphasis and code marks are removed, and whitespace is collapsed.
+
+A code fence opens at a line whose first non-whitespace characters are three or more backticks or three or more tildes, and closes at the next line whose first non-whitespace characters are the same character repeated at least as many times, followed by nothing but whitespace. Leading whitespace is allowed because tomd indents fences inside list items (627 papers have indented fences). A fence left open runs to the end of the paper.
 
 ### 5.4 Sections
 
@@ -117,24 +133,36 @@ Sections are produced by the splitter that today's paperweight and papergate pro
 
 1. The primary boundaries are H2 headings together with bold-numbered headings.
 2. When the primary boundaries yield fewer than four sections, the first of these that yields at least four is used instead: H3 headings, H1 headings, then plain numbered lines (`3. Title`). When none yields four, the primary boundaries are used.
-3. Sections tile the paper. If there is non-blank text before the first boundary, it is the front matter and is section 1. Each boundary starts a section that runs to the line before the next boundary. A paper with no boundaries is one section.
+3. Sections tile the paper. The lines before the first boundary, if any, are the front matter and form section 1 when any of them is non-blank; when all are blank, they belong to the first boundary's section, which then starts at line 1. Each boundary starts a section that runs to the line before the next boundary. A paper with no boundaries is one section.
 4. Sections are never split or shortened.
 
 Sections are numbered from 1. The number is called `section_index` in every tool.
 
 ### 5.5 Retrieval chunks
 
-Chunks exist only inside Qdrant and are returned as search hits. They are built per section:
+Chunks exist only inside Qdrant and are returned as search hits. They are built per section, from blocks.
+
+**Blocks.** A section is divided into blocks, each of one of five kinds. In this design, "block" alone means any of the five kinds, and "code block" means only the first kind.
+
+- **Code block:** a fenced code block ("Headings" above defines fences), from its opening fence line through its closing fence line, inclusive. Everything inside it belongs to it, including blank lines and lines that look like headings, tables, or list items.
+- **Table:** a run of consecutive lines beginning with `|`.
+- **List item:** a line beginning with `-`, `*`, `+`, or a number followed by `.` or `)`, plus the lines after it up to the next list item, blank line, or start of another block.
+- **Heading:** one heading line (§5.3).
+- **Paragraph:** a run of non-blank lines that is none of the above.
+
+Blank lines belong to the block before them; blank lines at the start of a section belong to the first block. Blocks therefore cover every line of a section with no gaps or overlaps.
+
+**Chunks.**
 
 - A chunk never crosses a section boundary.
-- A section is split only between blocks: paragraphs, list items, tables, and code blocks. A block is never split, except as below.
-- A code block or table stays whole. If one block alone exceeds the embedding model's 8,192-token input limit, it is split at line boundaries, with its opening fence or header row repeated on each piece, so every line is embedded.
-- The target size is about 400 tokens. A chunk runs long rather than break a block.
-- Each chunk after the first in a section starts with an overlap from the previous chunk: its last block or the last 15% of its tokens, whichever is smaller.
+- A chunk is a run of whole blocks. A block is never split, except as below.
+- The target size is about 400 tokens. A chunk runs long rather than split a block.
+- A code block or table that alone exceeds the embedding model's 8,192-token input limit is split at line boundaries into parts that each fit, with the opening fence (for a code block) or header row (for a table) repeated at the top of each part, so every line is embedded. This is the only case where a block is split.
+- Each chunk after the first in a section starts with an overlap: the previous chunk's last block, repeated whole, when that block is at most 200 tokens. Otherwise there is no overlap. The overlap is never part of a block, so a code block is never cut by it.
 - The text that is embedded starts with a context line, the paper id and the heading path (for example `p3045r9 › 4 Design › 4.2 Units`), followed by the chunk text.
 - Tokens are counted with the BGE-M3 tokenizer.
 
-The 400-token target and the overlap size are starting values and may need tuning once real search results can be judged; both are set in configuration. Chunking is deterministic: the same markdown and settings always produce the same chunks.
+The 400-token target and the 200-token overlap limit are starting values and may need tuning once real search results can be judged; both are set in configuration. Chunking is deterministic: the same markdown and settings always produce the same chunks.
 
 ## 6. Tools
 
@@ -142,13 +170,13 @@ Every tool declares an output schema and returns structured content with named f
 
 ### 6.1 `get_metadata(paper)`
 
-Returns one paper's metadata: `paper_id`, `title`, `authors` (list), `document_date`, `mailing_date`, `year`, `group`, `intent`, `url`, `disposition`, `previous_version`, `has_markdown`, and, when markdown exists, `total_lines` and `total_sections`. Dates are returned as the paperstore holds them; `mailing_date` is `YYYY-MM`.
+Returns one paper's metadata: `paper_id`, `title`, `authors` (list), `document_date`, `mailing_date`, `year`, `group`, `intent`, `url`, `disposition`, `previous_version`, `has_markdown`, and, when markdown exists, `total_lines` and `total_sections`. `mailing_date` is `YYYY-MM`. `document_date` is `YYYY-MM-DD`, or empty when the paperstore value is not a valid date in that form (see Filters).
 
 ### 6.2 `search_metadata(query?, papers?, start?, end?, date_field?, author?, limit?, cursor?)`
 
 Search over the metadata of every ingested paper, including papers without markdown, in the `paper_metadata` collection (§7.5). Each result has the fields of `get_metadata`. The filters and paging are the same as `search` (§6.8, §7.6).
 
-With `query`, results are ranked best match first and each carries a `score`. Without `query`, the call must give at least one filter, and results are ordered by `document_date`, newest first, with no `score`. A call with neither fails with `invalid_argument`.
+With `query`, results are ranked best match first and each carries a `score`. Without `query`, the call must give at least one filter, and results are ordered newest first by `document_date`, using the first day of the mailing month for papers with no document date, with ties broken by `paper_id`; they carry no `score`. The server gets this order by scrolling the matching records' `paper_id` and dates (never `markdown`) and sorting them itself, since Qdrant's `order_by` drops points that lack the ordering field and the whole collection is about 9,000 records. A call with neither fails with `invalid_argument`.
 
 ### 6.3 `list_revisions(paper)`
 
@@ -231,12 +259,23 @@ Errors carry a `code` and a message. Codes:
 One point (Qdrant's term for a stored record) per chunk, with:
 
 - a dense vector `dense`: BGE-M3, 1,024 dimensions, cosine distance;
-- a sparse vector `bm25`: Qdrant's BM25 with the IDF modifier, generated by Qdrant from the chunk text, with stemming off, stopword removal off, and no language set, so C++ keywords such as `for`, `if`, `and`, `or`, and `not` and identifiers such as `views` and `ranges` match as words. Punctuation is not indexed, so operators such as `<=>` and `::` are not searchable;
-- a payload with `paper_id`, `title`, `document_date`, `mailing_date`, `section_index`, `heading_path`, `first_line`, `last_line`, and `text`.
+- a sparse vector `bm25`: Qdrant's BM25 with the IDF modifier, generated by Qdrant from the chunk text (see BM25 settings below), so C++ keywords such as `for`, `if`, `and`, `or`, and `not` and identifiers such as `views` and `ranges` match as words. Punctuation is not indexed, so operators such as `<=>` and `::` are not searchable;
+- a payload with `paper_id`, `title`, `document_date`, `mailing_date`, `mailing_date_filter`, `section_index`, `heading_path`, `first_line`, `last_line`, and `text`.
 
 ### 7.2 Embeddings
 
-Dense vectors are computed locally with `fastembed-rs` running BGE-M3 on CPU, at ingest for chunks and at query time for the search text. The model's maximum input length is set to 8,192 tokens, so no chunk is truncated before embedding. The model weights are downloaded once from Hugging Face into a cache directory and reused. BM25 vectors are generated by Qdrant itself, so ingest and query use the same tokenization by construction.
+Dense vectors are computed locally with `fastembed-rs` running BGE-M3 on CPU, at ingest for chunks and at query time for the search text. `fastembed-rs` supports BGE-M3 as `EmbeddingModel::BGEM3`, but its default maximum input length is 512 tokens; both ingest and serve set it to 8,192 with `with_max_length`, so no chunk is truncated before embedding. The model weights (about 2.3 GB of ONNX) are downloaded once from Hugging Face into a cache directory and reused, and both commands hold the model in memory.
+
+**BM25 settings.** Qdrant generates BM25 vectors itself, from a `Document` with the `qdrant/bm25` model and options sent with each request. The options are not stored in the collection, so ingest and serve send the same options from shared code. Qdrant assumes English when no language is set, applying English stopwords and stemming, so both are turned off explicitly. The options are:
+
+- `tokenizer`: `word`;
+- `lowercase`: `true`;
+- `ascii_folding`: `true`;
+- `stemmer`: `{"type": "none"}`;
+- `stopwords`: an empty set (`{"custom": []}`);
+- `avg_len`: the expected average length of the text in that vector, set per vector in configuration. Starting values: 300 for chunk text (about 400 BGE-M3 tokens), 6 for titles, 4 for author names, and 12 for the `other` field. A fixed value is used instead of a measured one so that papers ingested at different times are scored alike.
+
+These settings need Qdrant 1.19 or later (local BM25 arrived in 1.15.2, weighted RRF in 1.17, and the explicit stemmer switch in 1.19).
 
 ### 7.3 Query types
 
@@ -246,7 +285,7 @@ Dense vectors are computed locally with `fastembed-rs` running BGE-M3 on CPU, at
 
 ### 7.4 Filters
 
-Filters run inside Qdrant on payload indexes created with each collection, before any point is written: keyword on `paper_id`, and datetime on `document_date` and `mailing_date`. A paper with no document date has no `document_date` value, so a `document_date` range never matches it. `mailing_date` is stored as the first of its month (`2026-01` is stored as `2026-01-01`).
+Filters run inside Qdrant on payload indexes created with each collection, before any point is written: keyword on `paper_id`, and datetime on `document_date` and `mailing_date_filter`. Ingest stores `document_date` only when the paperstore value is a valid date in the form `YYYY-MM-DD`. Any other value is treated as no document date: it is not stored, the paper never matches a `document_date` range, and ingest logs a warning naming the paper and the value. Of 9,339 papers, 270 have such values today (author names, `2013-4-25`, `20130825`, dates with Unicode hyphens, or empty); fixing them is a paperstore ticket, and this server does not try to repair them. `mailing_date` holds the month as the paperstore does (`2026-01`) and is what tools return. Qdrant's datetime index needs a full date, so each record also holds `mailing_date_filter`, the first of that month (`2026-01-01`), which the `mailing_date` filter runs on and no tool returns.
 
 The `author` filter is a substring match on `authors_folded` in `paper_metadata`, which has no full-text index so that Qdrant matches substrings. `search_metadata` applies it directly. `search` first resolves it to the set of matching paper ids in `paper_metadata`, then filters `paper_chunks` on `paper_id`.
 
@@ -254,7 +293,7 @@ The `author` filter is a substring match on `authors_folded` in `paper_metadata`
 
 One point per paper. It is the source for every tool except `search`, and the index for `search_metadata`.
 
-**Payload:** the fields `get_metadata` returns; `series` (`p`, `d`, `n`, or `sd`), `number`, and `revision` (empty for N and SD papers), parsed from the id; `authors_folded` (the author names after case and accent folding); `cites` (a list of cited paper ids with mention counts) and `cited_ids` (the same ids alone, for the `cited_by` lookup); `citations_extracted`; and, when the paper has markdown, `markdown`, the full file. Every id in the payload is lower case. Outlines and sections are computed from `markdown` by the same code ingest uses for chunking. Tools that do not need the paper text exclude `markdown` when they fetch records. Payload indexes: keyword on `paper_id`, `series`, `previous_version`, and `cited_ids`; integer on `number`; datetime on `document_date` and `mailing_date`.
+**Payload:** the fields `get_metadata` returns; `series` (`p`, `d`, `n`, or `sd`), `number`, and `revision` (empty for N and SD papers), parsed from the id; `authors_folded` (the author names after case and accent folding); `mailing_date_filter` (see Filters above); `cites` (a list of cited paper ids with mention counts) and `cited_ids` (the same ids alone, for the `cited_by` lookup); `citations_extracted`; and, when the paper has markdown, `markdown`, the full file, and `chunker_version` (see Ingest). Every id in the payload is lower case. Outlines and sections are computed from `markdown` by the same code ingest uses for chunking. Tools that do not need the paper text exclude `markdown` when they fetch records. Payload indexes: keyword on `paper_id`, `series`, `previous_version`, and `cited_ids`; integer on `number`; datetime on `document_date` and `mailing_date_filter`.
 
 **Search vectors:** three BM25 sparse vectors, generated by Qdrant with the same settings as §7.1:
 
@@ -266,7 +305,7 @@ A `search_metadata` query runs against all three vectors as prefetches, merged b
 
 ### 7.6 Paging
 
-`search` and `search_metadata` follow the MCP specification's pagination convention. `limit` sets the page size and defaults to 10. A response includes `nextCursor` when more results exist and omits it on the last page. The caller passes `cursor` back unchanged to get the next page. The cursor is opaque; the server encodes the query, type, filters, page size, and offset in it, and rejects a cursor used with different arguments. Each prefetch in a fused query retrieves `offset + limit` candidates, so every page is cut from the same fused list.
+`search` and `search_metadata` follow the MCP specification's pagination convention. `limit` sets the page size and defaults to 10. A response includes `nextCursor` when more results exist and omits it on the last page. The caller passes `cursor` back unchanged to get the next page. The cursor is opaque; the server encodes the query, type, filters, page size, and offset in it, and rejects a cursor used with different arguments. `fulltext` and `vector` searches page by offset over one ranked list. Fused queries (`hybrid`, and `search_metadata` with a query) have each prefetch retrieve a fixed number of candidates, 1,000 by default and set in configuration, whatever the page. Every page is then cut from the same fused list, so pages never repeat or skip a result. Results end where that list ends.
 
 ## 8. Ingest
 
@@ -274,7 +313,7 @@ A `search_metadata` query runs against all three vectors as prefetches, merged b
 
 Ingest writes every paper id in lower case. A paper has markdown when its `markdown_path` is non-empty. Ingest reads the markdown from `markdown_path` as stored; a path that cannot be read is logged as an error naming the paper and the path, and the paper counts as failed.
 
-For each selected paper, ingest writes its `paper_metadata` record (§7.5), whether or not the paper has markdown, replacing any existing record so metadata and citations stay current. If the paper has markdown and its chunks are not yet in Qdrant, ingest splits it into sections (§5.4), chunks them (§5.5), embeds the chunks (§7.2), and writes them to `paper_chunks`. A paper's chunks are written before its metadata record, so a paper whose record holds `markdown` always has complete chunks; a paper interrupted mid-ingest has no record carrying `markdown` and is chunked again on the next run. `--force` deletes that paper's chunks and writes them again. Ingest reports how many papers it indexed, skipped, and failed, and which had no markdown.
+For each selected paper, ingest writes its `paper_metadata` record (§7.5), whether or not the paper has markdown, replacing any existing record so metadata and citations stay current. A paper with markdown is chunked when its existing record has no `markdown`, when the record's `chunker_version` differs from the current one, or when `--force` is given. `chunker_version` is a hash of everything that shapes chunks: the splitter and chunker code version, the chunk target size, the overlap limit, and the embedding model. Chunking a paper first deletes all of its points in `paper_chunks` by `paper_id`, then splits it into sections (§5.4), chunks them (§5.5), embeds the chunks (§7.2), and writes them. Each chunk's point id is a UUIDv5 of the paper id, section index, and chunk number within the section, so rewriting a paper never duplicates points. A paper's chunks are written before its metadata record, which then stores `markdown` and `chunker_version`; a paper whose record holds `markdown` therefore always has complete chunks, and a paper interrupted mid-ingest is chunked again on the next run. Ingest reports how many papers it indexed, skipped, and failed, and which had no markdown.
 
 The local store holds about 470 MB of markdown, so the first full ingest embeds several hundred thousand chunks on CPU and takes hours.
 
@@ -284,7 +323,7 @@ Ingest runs only when an operator runs it by hand. No timer, hook, or pipeline s
 
 - **MCP library.** `rmcp`, the official Rust MCP SDK, serving stateless Streamable HTTP on axum.
 - **Auth.** Bearer tokens from the same keys file the Python server uses (`secrets/paper-mcp-keys`), one token per line. Tokens are compared in constant time. The server reloads the file when it receives SIGHUP (`docker compose kill -s HUP paper-mcp-rust`), so tokens can be added or removed without a restart. A reload that yields no tokens is rejected and the previous tokens stay in force, as in the Python server. A missing or invalid token gets HTTP 401 before the request reaches the MCP layer.
-- **Data access.** The server reads only Qdrant. It does not open `paperstore.db` or the markdown files. The Qdrant client's message size limits are raised above the largest paper record.
+- **Data access.** The server reads only Qdrant. It does not open `paperstore.db` or the markdown files. The Qdrant client's message size limits, in both ingest and serve, are raised above the largest paper record (the largest markdown file, n4485, is 3.4 MB). Both collections are created with `on_disk_payload` so the roughly 470 MB of stored markdown stays on disk rather than in RAM.
 - **Rust version.** The workspace `rust-version` is raised from 1.89 to what the dependencies require. The pinned toolchain is already 1.98.0.
 
 ## 10. Deployment
@@ -292,7 +331,7 @@ Ingest runs only when an operator runs it by hand. No timer, hook, or pipeline s
 paper-mcp is deployed by `wg21-website`'s `docker-compose.yml` as two new services beside the existing ones:
 
 - `paper-mcp-rust` runs `paper-mcp serve`. It mounts `secrets/` read-only and keeps the model cache on a volume. It also mounts the paperflow workspace read-only, which only ingest uses. Its settings are `WG21_DATA_DIR`, `PAPER_MCP_KEYS_FILE`, the Qdrant URL and API key, and the model cache directory. Its port is published on `127.0.0.1` only, and the host-level nginx proxies `/papers/mcp` to it. The name `paper-mcp-rust` is used for this Compose service only.
-- `qdrant` runs a pinned Qdrant image with an API key set and its storage on a volume. Its port is published on `127.0.0.1:6333` only, so the dashboard is reachable through an SSH tunnel to the server and nothing is exposed publicly.
+- `qdrant` runs a pinned Qdrant image, 1.19 or later (see BM25 settings), with an API key set and its storage on a volume. Its port is published on `127.0.0.1:6333` only, so the dashboard is reachable through an SSH tunnel to the server and nothing is exposed publicly.
 
 Ingest runs by hand in the server's image: `docker compose run --rm paper-mcp-rust paper-mcp ingest <targets>`.
 
