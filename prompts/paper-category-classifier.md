@@ -2,8 +2,8 @@
 name: paper-category-classifier
 description: Classify a WG21 paper as a process paper or not, reading it through the paper-mcp server by id
 runvil: 0
-plugins:
-  - wg21-papers
+uses:
+  - mcp
 models:
   writer:
     keywords: [no-thinking]
@@ -51,14 +51,26 @@ local THRESHOLD = 0.5          -- top-2 mean of section ask rates that makes
 -- server's JSON is its text blocks. The few fields needed are read from that
 -- text with a small string decoder.
 
-local function unwrap(result)
-    local parts = {}
-    for _, block in ipairs(result.content) do
-        if block.type == "text" then
-            table.insert(parts, block.text)
+-- The mcp Pack connects to its servers in the background, so a run that
+-- calls a tool at once finds wg21-papers still loading. This polls the
+-- server's status until it is ready, and fails with its reason on error.
+local function wait_for_papers()
+    for _ = 1, 20000 do
+        local entry = json.decode(tools.call("mcp/get_dynamic_tools", { namespace = "wg21-papers" }))
+        if entry.status == "ready" then
+            return
+        elseif entry.status == "error" then
+            error("the wg21-papers MCP server failed to start: " .. tostring(entry.reason))
         end
     end
-    return table.concat(parts, "\n\n")
+    error("the wg21-papers MCP server did not become ready")
+end
+
+-- The mcp Pack answers a script's call with the server's text blocks joined
+-- by blank lines.
+local function paper_tool(tool, arguments)
+    return tools.call("mcp/call_dynamic_tool",
+        { namespace = "wg21-papers", toolName = tool, arguments = arguments })
 end
 
 local function utf8_encode(cp)
@@ -121,7 +133,8 @@ if not (id:match("^[PD]%d+R%d+$") or id:match("^N%d+$") or id:match("^SD%-%d+$")
     error("pass the paper id as --args, e.g. --args P4003R2 (got " .. string.format("%q", id) .. ")")
 end
 
-local meta = unwrap(tools.call("wg21-papers/get_metadata", { paper = id }))
+wait_for_papers()
+local meta = paper_tool("get_metadata", { paper = id })
 local title = json_string(meta, "title") or ""
 local group = json_string(meta, "group") or ""
 local intent = json_string(meta, "intent") or ""
@@ -162,8 +175,7 @@ end
 
 local units = {}
 for _, k in ipairs(indices) do
-    local raw = unwrap(tools.call("wg21-papers/get_sections",
-        { paper = id, first = k, last = k }))
+    local raw = paper_tool("get_sections", { paper = id, first = k, last = k })
     local heading = json_string(raw, "heading") or ""
     local text = json_string(raw, "text") or ""
     -- Embedded images arrive as base64 data URIs; keep the alt text only.

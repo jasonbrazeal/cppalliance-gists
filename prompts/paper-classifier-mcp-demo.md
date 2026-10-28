@@ -2,8 +2,8 @@
 name: paper-classifier-mcp-demo
 description: Build a JSON dossier for each WG21 paper from several paper-mcp tools, then have the model classify it as a proposal or a non-proposal paper
 runvil: 0
-plugins:
-  - wg21-papers
+uses:
+  - mcp
 models:
   classifier:
     min_context: 32768
@@ -22,25 +22,35 @@ models.default("classifier")
 ## Gather
 
 ```lua
+-- The mcp Pack connects to its servers in the background, so a run that
+-- calls a tool at once finds wg21-papers still loading. This polls the
+-- server's status until it is ready, and fails with its reason on error.
+local function wait_for_papers()
+    for _ = 1, 20000 do
+        local entry = json.decode(tools.call("mcp/get_dynamic_tools", { namespace = "wg21-papers" }))
+        if entry.status == "ready" then
+            return
+        elseif entry.status == "error" then
+            error("the wg21-papers MCP server failed to start: " .. tostring(entry.reason))
+        end
+    end
+    error("the wg21-papers MCP server did not become ready")
+end
+
 local PAPERS = { "P3045R9", "P2728R14", "P4313R1", "P4294R1", "N5049", "N5045" }
 local EXCERPT_BUDGET = 2500
 local CITES_SHOWN = 5
 
--- A paper-mcp tool call returns the server's CallToolResult as a table. The
--- server sends the same JSON twice: as the first text block, and decoded as
--- structuredContent. Decoding the text block with json.decode shows the
--- parsing step; structuredContent is the fallback.
+-- The mcp Pack answers a script's call with the server's text: the JSON
+-- the paper-mcp tool returns, which json.decode parses.
 local function call(tool, arguments)
-    local result = tools.call("wg21-papers/" .. tool, arguments)
-    for _, block in ipairs(result.content) do
-        if block.type == "text" then
-            local ok, value = pcall(json.decode, block.text)
-            if ok and type(value) == "table" then
-                return value
-            end
-        end
+    local text = tools.call("mcp/call_dynamic_tool",
+        { namespace = "wg21-papers", toolName = tool, arguments = arguments })
+    local ok, value = pcall(json.decode, text)
+    if not ok or type(value) ~= "table" then
+        error(string.format("%s did not return JSON: %s", tool, text:sub(1, 500)))
     end
-    return result.structuredContent
+    return value
 end
 
 -- JSON null arrives as json.null, so optional lists are checked by type.
@@ -260,6 +270,8 @@ local function paper_head(id)
 
     return chunks[1] or ""
 end
+
+wait_for_papers()
 
 local papers = {}
 local missing = {}
