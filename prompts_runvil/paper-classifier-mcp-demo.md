@@ -5,19 +5,14 @@ runvil: 0
 uses:
   - mcp
 models:
-  classifier:
+  default:
     min_context: 32768
-    description: A careful analysis model suited to structured classification
 output:
   path: report.md
   description: A markdown report with each paper's dossier facts, a heuristic guess, the model's label, and the results as JSON Lines
 ---
 
 # Paper Classifier MCP Demo
-
-```lua
-models.default("classifier")
-```
 
 ## Gather
 
@@ -378,7 +373,7 @@ return "Done."
 ### Classify
 
 ```lua
-models.use("classifier", { temperature = 0.3 })
+models.use("default", { temperature = 0.3 })
 var.paper_head = untrusted(store.read("head_" .. item .. ".md"))
 ```
 

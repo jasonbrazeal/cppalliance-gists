@@ -5,17 +5,13 @@ runvil: 0
 uses:
   - mcp
 models:
-  writer: {}
+  default: {}
 output:
   path: report.md
   description: The parsed results of each tool call, in markdown
 ---
 
 # Paper JSON
-
-```lua
-models.default("writer")
-```
 
 ## Read
 

@@ -5,10 +5,9 @@ runvil: 0
 uses:
   - mcp
 models:
-  writer:
-    keywords: [no-thinking]
+  default:
+    thinking: false
     min_context: 32768
-    description: A careful analysis model suited to structured classification
 output:
   path: report.md
   description: One line, `process paper = true` or `process paper = false`
@@ -20,7 +19,6 @@ output:
 -- Prose-free on purpose: this chunk only binds the model. Every later block is
 -- self-contained and passes data through the store.
 
-models.default("writer")
 ```
 
 ## Classify
@@ -275,7 +273,7 @@ return "Done."
 ### Grade
 
 ```lua
-models.use("writer", { temperature = 0.3 })
+models.use("default", { temperature = 0.3 })
 local u = item:match("^(%d+)|")
 var.context = untrusted(store.read("pc_context.md"))
 var.section = untrusted(store.read("pc_unit_" .. u .. ".md"))

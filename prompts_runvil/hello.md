@@ -8,7 +8,7 @@ args:
     optional: true
     description: Who to greet. Extra JSON fields, such as an ids list holding nulls, are kept in argv
 models:
-  writer: {}
+  default: {}
 output:
   path: report.md
   description: Every json result, followed by the greeting
@@ -17,8 +17,6 @@ output:
 # Hello World
 
 ```lua
-models.default("writer")
-
 -- Plain text arguments leave argv nil, so repair it here, while argv is
 -- still writable. json.decode gives the nested null; json.array keeps tags a
 -- list once argv is frozen.
