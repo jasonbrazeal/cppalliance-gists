@@ -216,3 +216,13 @@ local _ = models.infer(p)  -- runvil: allow unused-local
 - **Mismatch at parse time.** If mlua and our parser disagree on a block, the parse reports an `Internal` failure naming the block.
 - **Checks.** `prompts_runvil/lint-errors.md` in this repository has one section per check, errors, warnings, and lints alike, and a section of valid lookalikes that must report nothing.
 - **Turning checks off.** Tests cover a comment at the end of a line, several names in one comment, a comment that names an error or no check, and `--no-lint`. A comment on its own line turns a check off for the whole prompt, so it is tested in a prompt of its own.
+
+## How this fits into the existing code
+
+Nothing that runs a prompt changes. The work touches:
+
+- **New code:** a Lua parser crate and the checks, in `runvil-harness/crates/runvil-internal/`.
+- **Updated parsing code:** `runvil-harness/crates/runvil-internal/prompt/`, which collects problems instead of stopping at the first one. Section path resolution and placeholder parsing move from `runvil-harness/crates/runvil-internal/runtime/` into `runvil-harness/crates/runvil-internal/prompt/`, so the checks and the run share one implementation.
+- **The API table** of the Engine's built-in globals, their members, and argument counts: `runvil-harness/crates/runvil-internal/lua/`, beside `RESERVED_NAMES`.
+- **Callers of the parse:** `Host::parse` in `runvil-harness/crates/harness-internal/runner/`, the `runvil` facade's exports, and Workshop's prompt routes in `runvil-workshop/crates/workshop/`.
+- **Docs:** `runvil-harness/decisions/` and the language guide in `runvil-docs/src/language/`.
