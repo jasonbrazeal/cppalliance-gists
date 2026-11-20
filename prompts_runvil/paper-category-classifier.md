@@ -8,18 +8,14 @@ models:
   default:
     thinking: false
     min_context: 32768
-output:
-  path: report.md
-  description: One line, `process paper = true` or `process paper = false`
+args:
+  type: object
+  properties:
+    paper: { type: string, description: 'The id of the paper to classify, such as P4003R2' }
+  required: [paper]
 ---
 
-# Paper Category Classifier
-
-```lua
--- Prose-free on purpose: this chunk only binds the model. Every later block is
--- self-contained and passes data through the store.
-
-```
+The run returns one line, `process paper = true` or `process paper = false`.
 
 ## Classify
 
@@ -126,9 +122,9 @@ end
 
 -- --- the paper --------------------------------------------------------------
 
-local id = (tostring(args or "")):gsub("%s+", ""):upper()
+local id = args.paper:gsub("%s+", ""):upper()
 if not (id:match("^[PD]%d+R%d+$") or id:match("^N%d+$") or id:match("^SD%-%d+$")) then
-    error("pass the paper id as --args, e.g. --args P4003R2 (got " .. string.format("%q", id) .. ")")
+    error("pass the paper id as --args, e.g. --args '{\"paper\": \"P4003R2\"}' (got " .. string.format("%q", id) .. ")")
 end
 
 wait_for_papers()
@@ -158,7 +154,7 @@ end
 -- Standing documents are directional by definition: no model needed.
 if id:match("^SD%-") then
     finish(false, "standing document, directional by definition")
-    return "Done."
+    return store.read("report.md")
 end
 
 -- --- units: one per section, fetched by index -------------------------------
@@ -206,7 +202,7 @@ for u = 1, #units do
         table.insert(jobs, u .. "|" .. s)
     end
 end
-tasks.fanout("### Grade", jobs)
+tasks.fanout("Grade", jobs)
 
 -- --- validate and aggregate -------------------------------------------------
 
@@ -267,7 +263,7 @@ local score = (#sorted == 1) and sorted[1] or (sorted[1] + sorted[2]) / 2
 table.insert(diag, string.format("unquoted asks rejected: %d", rejected))
 
 finish(score < THRESHOLD, string.format("top-2 ask rate %.2f, threshold %.2f", score, THRESHOLD))
-return "Done."
+return store.read("report.md")
 ```
 
 ### Grade

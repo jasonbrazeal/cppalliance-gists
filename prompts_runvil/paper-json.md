@@ -4,15 +4,15 @@ description: Tour every tool of the Rust paper-mcp server for one WG21 paper and
 runvil: 0
 uses:
   - mcp
-output:
-  path: report.md
-  description: The parsed results of each tool call, in markdown
+args:
+  type: object
+  properties:
+    paper: { type: string, default: P3045R9, description: The id of the paper to read }
 ---
 
-# Paper JSON
-
-Pass a paper id with `--args`, such as `--args P2728R14`; the default is
-`P3045R9`. The paper must be indexed in the server's Qdrant.
+Pass a paper id with `--args`, such as `--args '{"paper": "P2728R14"}'`; the
+default is `P3045R9`. The paper must be indexed in the server's Qdrant. The
+run returns its report: the parsed results of each tool call, in markdown.
 
 ## Read
 
@@ -58,10 +58,7 @@ local function first_line(text)
     return (tostring(text):match("^%s*([^\n]*)") or ""):sub(1, 120)
 end
 
-local paper = tostring(args or ""):gsub("%s+", "")
-if paper == "" then
-    paper = "P3045R9"
-end
+local paper = args.paper:gsub("%s+", "")
 store.write("report.md", "# " .. paper .. " through the Rust paper-mcp server\n")
 
 heading("The server's tools")
@@ -158,5 +155,5 @@ for _, result in ipairs(recent.results) do
     show("  " .. result.paper_id, result.document_date .. "  " .. result.title)
 end
 
-return "Done."
+return store.read("report.md")
 ```

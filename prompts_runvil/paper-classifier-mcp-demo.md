@@ -7,12 +7,10 @@ uses:
 models:
   default:
     min_context: 32768
-output:
-  path: report.md
-  description: A markdown report with each paper's dossier facts, a heuristic guess, the model's label, and the results as JSON Lines
 ---
 
-# Paper Classifier MCP Demo
+The run returns a markdown report with each paper's dossier facts, a
+heuristic guess, the model's label, and the results as JSON Lines.
 
 ## Gather
 
@@ -300,7 +298,7 @@ local jobs = {}
 for i = 1, #papers do
     table.insert(jobs, tostring(i))
 end
-local replies = tasks.fanout("### Classify", jobs)
+local replies = tasks.fanout("Classify", jobs)
 
 -- --- read the model's replies and report ------------------------------------
 
@@ -330,7 +328,7 @@ local out = {
 }
 
 for i, d in ipairs(papers) do
-    local verdict = parse_reply(replies[i])
+    local verdict = parse_reply(replies[i].text)
     counts[verdict.label] = (counts[verdict.label] or 0) + 1
     if verdict.label == d.heuristic then agree = agree + 1 end
     table.insert(out, string.format("| %s | %s | %s | %d | %d | %d / %d | %d / %d / %d | %s (%d) | **%s** | `%s` |",
@@ -367,7 +365,7 @@ table.insert(out, (json.encode_lines(rows):gsub("\n$", "")))
 table.insert(out, "```")
 
 store.write("report.md", table.concat(out, "\n") .. "\n")
-return "Done."
+return store.read("report.md")
 ```
 
 ### Classify

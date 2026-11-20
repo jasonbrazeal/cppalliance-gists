@@ -3,29 +3,13 @@ name: hello
 description: Say hello, and tour the Lua json global
 runvil: 0
 args:
-  name:
-    type: string
-    optional: true
-    description: Who to greet. Extra JSON fields, such as an ids list holding nulls, are kept in argv
-models:
-  default: {}
-output:
-  path: report.md
-  description: Every json result, followed by the greeting
+  type: object
+  properties:
+    name: { type: string, default: world, description: Who to greet }
+  additionalProperties: true
 ---
 
-# Hello World
-
 ```lua
--- Plain text arguments leave argv nil, so repair it here, while argv is
--- still writable. json.decode gives the nested null; json.array keeps tags a
--- list once argv is frozen.
-if not argv then
-    argv = { name = args ~= "" and args or nil }
-end
-argv.name = argv.name or "world"
-argv.ids = argv.ids or json.decode("[1, null, 3]")
-argv.tags = argv.tags or json.array()
 store.write("report.md", "# Hello, json\n")
 ```
 
@@ -129,17 +113,23 @@ local function caught(f, ...)
     return string.format("[%s] %s", tostring(err.kind), tostring(err))
 end
 
-heading("frozen argv")
-show("json.encode(argv) returns the stored data", json.encode(argv))
-show("a nested null reads as json.null", tostring(argv.ids[2] == json.null))
-show("so # still counts it", #argv.ids)
-show("argv is frozen outside the H1 pass", caught(function() argv.name = "changed" end))
+heading("read-only args")
+show("json.encode(args) returns the checked object", json.encode(args))
+show("a missing field takes its declared default", args.name)
+-- An undeclared field such as `ids` arrives because the declaration says
+-- `additionalProperties: true`, as in --args '{"ids": [1, null, 3]}'.
+if args.ids then
+    show("a nested null reads as json.null", tostring(args.ids[2] == json.null))
+    show("so # still counts it", #args.ids)
+end
+show("a write to a field raises", caught(function() args.name = "changed" end))
+show("an assignment to the global raises", caught(function() args = {} end))
 ```
 
 ## Greet
 
 ```lua
-var.person = { name = argv.name, languages = { "English", "Spanish", "French" } }
+var.person = { name = args.name, languages = { "English", "Spanish", "French" } }
 var.extras = json.array()
 ```
 
@@ -178,4 +168,5 @@ else
     show("the reply was not the requested JSON", caught(json.decode, body))
     store.append("report.md", "\n" .. reply .. "\n")
 end
+return store.read("report.md")
 ```

@@ -3,17 +3,16 @@ name: critique
 description: Check a summary against the paper
 runvil: 0
 args:
- paper:
-   type: string
- summary:
-   type: string
+  type: object
+  properties:
+    paper: { type: string, description: The paper's text }
+    summary: { type: string, description: The summary to check }
+  required: [paper, summary]
 ---
-
-# Critique
 
 ## Main
 
 ```lua
-return models.infer("Paper:\n\n" .. untrusted(argv.paper)
- .. "\n\nList anything this summary gets wrong:\n\n" .. argv.summary)
+return models.infer("Paper:\n\n" .. untrusted(args.paper)
+ .. "\n\nList anything this summary gets wrong:\n\n" .. args.summary)
 ```
